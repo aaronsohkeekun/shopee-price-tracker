@@ -1,0 +1,30 @@
+# .gitignore
+# Files and folders listed here are NEVER uploaded to GitHub.
+# This protects your secrets and keeps your repo clean.
+
+# NEVER upload the local secrets file — it contains your API key!
+.streamlit/secrets.toml
+
+# Don't upload the local price history CSV to GitHub
+# (it lives on the server/your computer, not in code)
+price_history.csv
+
+# Python cache files — auto-generated, not needed on GitHub
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment folders (if you use one)
+venv/
+env/
+.venv/
+
+# macOS system files
+.DS_Store
+
+# Windows system files
+Thumbs.db
+
+# Environment variable files
+.env
