@@ -210,24 +210,6 @@ def is_missing(value: str) -> bool:
     return str(value).strip().lower() in MISSING_VALUES
 
 
-def clean_quantity(value: str) -> str:
-    """
-    Strips all non-numeric characters from a quantity/stock value,
-    returning only the integer portion.
-    Examples:
-        "30 pieces available" → "30"
-        "32"                  → "32"
-        "Stock: 18"           → "18"
-        "N/A"                 → "N/A"
-        ""                    → "N/A"
-    """
-    if not value or str(value).strip().lower() in MISSING_VALUES:
-        return "N/A"
-    # re.search finds the first group of digits in the string
-    match = re.search(r'\d+', str(value))
-    return match.group() if match else "N/A"
-
-
 def create_tracking_id(title: str, seller: str) -> str:
     """
     Builds the unique tracking key: 'Product Title | Seller Name'
@@ -509,10 +491,6 @@ def main():
             # are stored identically and tracked as the same entry.
             final_title  = final_title.strip().title()
             final_seller = final_seller.strip().title()
-
-            # Strip all words from quantity — store only the integer.
-            # "30 pieces available" → "30", "Stock: 18" → "18"
-            final_stock  = clean_quantity(final_stock)
 
             timestamp   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             tracking_id = create_tracking_id(final_title, final_seller)
