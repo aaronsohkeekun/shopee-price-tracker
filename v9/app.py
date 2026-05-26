@@ -229,17 +229,6 @@ def main():
     )
     st.divider()
 
-    # reset_counter is an integer stored in session_state.
-    # Every time the user clicks "Clear All Fields", we add 1 to it.
-    # We then attach the counter to every widget's key= parameter.
-    # Because the key changes, Streamlit treats each field as a brand
-    # new widget and renders it completely empty — a reliable full reset.
-    if "reset_counter" not in st.session_state:
-        st.session_state.reset_counter = 0
-
-    # Shorthand — we'll use this variable when building widget keys below
-    r = st.session_state.reset_counter
-
     # Connect to Gemini — stop if connection fails
     client = get_gemini_client()
     if client is None:
@@ -255,24 +244,10 @@ def main():
     with st.expander("📸 **Track a New Price Entry**", expanded=True):
 
         # Step 1 — URL
-        # --- Clear / Reset Button ---
-        # Sits at the very top of the form so it's easy to find.
-        # Clicking it wipes all fields and pasted images instantly,
-        # ready for the next product entry.
-        if st.button("🔄 Clear All Fields & Start Over", key="clear_all"):
-            # Incrementing the counter changes ALL widget keys at once.
-            # Streamlit sees new keys = brand new empty widgets. Reliable full reset.
-            st.session_state.reset_counter += 1
-            st.session_state.pasted_images = []
-            st.rerun()
-
-        st.divider()
-
         st.markdown("#### Step 1 — Product URL *(optional)*")
         product_url = st.text_input(
             label="Paste the Shopee product URL here (saved for your records only)",
             placeholder="https://shopee.com.my/product/...",
-            key=f"url_input_{r}",   # f-string includes counter — changes key on reset
         )
 
         st.divider()
@@ -293,13 +268,11 @@ def main():
         try:
             from streamlit_paste_button import paste_image_button
 
-            # Including r in the key forces a brand-new paste button
-            # after every clear or save — so the old image doesn't re-fire.
             paste_result = paste_image_button(
                 label="📋 Click here to paste screenshot from clipboard",
                 background_color="#2d6a4f",
                 hover_background_color="#1b4332",
-                key=f"paste_btn_{r}",
+                key="paste_btn",
             )
 
             if paste_result and paste_result.image_data is not None:
@@ -324,8 +297,7 @@ def main():
                     with paste_cols[i % 4]:
                         st.image(pb, caption=f"Pasted {i + 1}", use_container_width=True)
 
-                if st.button("🗑️ Clear pasted images", key=f"clear_paste_{r}"):
-                    st.session_state.reset_counter += 1
+                if st.button("🗑️ Clear pasted images", key="clear_paste"):
                     st.session_state.pasted_images = []
                     st.rerun()
 
@@ -370,28 +342,26 @@ def main():
 
         oc1, oc2 = st.columns(2)
         with oc1:
-            # Each key includes r (the reset counter).
-            # When r increases, Streamlit creates a fresh empty widget.
             manual_title = st.text_input(
                 "📦 Product Title",
                 placeholder="e.g. Wireless Bluetooth Earbuds Pro Max",
-                key=f"manual_title_{r}",
+                key="manual_title",
             )
             manual_price = st.text_input(
                 "💰 Price",
                 placeholder="e.g. RM 25.90",
-                key=f"manual_price_{r}",
+                key="manual_price",
             )
         with oc2:
             manual_seller = st.text_input(
                 "🏪 Seller / Shop Name",
                 placeholder="e.g. TechShopMY Official Store",
-                key=f"manual_seller_{r}",
+                key="manual_seller",
             )
             manual_stock = st.text_input(
                 "📦 Stock / Quantity Left *(optional)*",
                 placeholder="e.g. 47  — or leave blank for N/A",
-                key=f"manual_stock_{r}",
+                key="manual_stock",
             )
 
         st.divider()
@@ -442,12 +412,6 @@ def main():
                 }
 
             # Merge AI + manual overrides
-            # Read the current values from session_state using the dynamic keys
-            manual_title  = st.session_state.get(f"manual_title_{r}",  "")
-            manual_price  = st.session_state.get(f"manual_price_{r}",  "")
-            manual_seller = st.session_state.get(f"manual_seller_{r}", "")
-            manual_stock  = st.session_state.get(f"manual_stock_{r}",  "")
-
             def resolve(manual_val, ai_val, fallback="Not Found"):
                 mv = manual_val.strip() if manual_val else ""
                 if mv:
@@ -519,10 +483,8 @@ def main():
 
             st.info(f"🔑 **Tracking ID:** `{tracking_id}`")
 
-            # Auto-clear all fields after a successful save
-            # by incrementing the counter — same mechanism as the Clear button
-            st.session_state.reset_counter += 1
-            st.session_state.pasted_images = []
+            if "pasted_images" in st.session_state:
+                st.session_state.pasted_images = []
 
             st.rerun()
 

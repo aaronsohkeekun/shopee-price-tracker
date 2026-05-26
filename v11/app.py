@@ -293,13 +293,11 @@ def main():
         try:
             from streamlit_paste_button import paste_image_button
 
-            # Including r in the key forces a brand-new paste button
-            # after every clear or save — so the old image doesn't re-fire.
             paste_result = paste_image_button(
                 label="📋 Click here to paste screenshot from clipboard",
                 background_color="#2d6a4f",
                 hover_background_color="#1b4332",
-                key=f"paste_btn_{r}",
+                key="paste_btn",
             )
 
             if paste_result and paste_result.image_data is not None:
@@ -324,8 +322,7 @@ def main():
                     with paste_cols[i % 4]:
                         st.image(pb, caption=f"Pasted {i + 1}", use_container_width=True)
 
-                if st.button("🗑️ Clear pasted images", key=f"clear_paste_{r}"):
-                    st.session_state.reset_counter += 1
+                if st.button("🗑️ Clear pasted images", key="clear_paste"):
                     st.session_state.pasted_images = []
                     st.rerun()
 
