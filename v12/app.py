@@ -211,13 +211,8 @@ def is_missing(value: str) -> bool:
 
 
 def create_tracking_id(title: str, seller: str) -> str:
-    """
-    Builds the unique tracking key: 'Product Title | Seller Name'
-    Both parts are converted to Title Case so that entries like
-    'Sonos official store' and 'Sonos Official Store' are treated
-    as the same product+seller and don't create duplicate tracking lines.
-    """
-    return f"{title.strip().title()} | {seller.strip().title()}"
+    """Builds the unique tracking key: 'Product Title | Seller Name'"""
+    return f"{title.strip()} | {seller.strip()}"
 
 
 # =============================================================================
@@ -485,12 +480,6 @@ def main():
                 f"title={src_title}, price={src_price}, "
                 f"seller={src_seller}, stock={src_stock}"
             )
-
-            # Normalise title and seller to Title Case before saving.
-            # This ensures 'sonos official store' and 'Sonos Official Store'
-            # are stored identically and tracked as the same entry.
-            final_title  = final_title.strip().title()
-            final_seller = final_seller.strip().title()
 
             timestamp   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             tracking_id = create_tracking_id(final_title, final_seller)
