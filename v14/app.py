@@ -1,14 +1,19 @@
 # =============================================================================
-# SHOPEE PRICE TRACKER - app.py  (v7 — with streamlit-authenticator login)
+# SHOPEE PRICE TRACKER - app.py  (v5 — CSV storage, ready for Streamlit Cloud)
 # =============================================================================
-# WHAT'S NEW IN v7:
-#   • Login page added — users must enter username + password to access the app.
-#   • Two accounts pre-configured: one for you, one for your wife.
-#   • A "Welcome, [Name]" greeting and Logout button appear in the sidebar
-#     once logged in.
-#   • Credentials are stored securely in Streamlit Secrets — never in code
-#     or on GitHub.
-#   • Everything else (screenshots, AI extraction, dashboard, CSV) unchanged.
+# STORAGE: Local CSV file (price_history.csv)
+# NOTE: On Streamlit Community Cloud, this CSV resets if the app restarts.
+#       Use the Download button regularly to back up your data locally.
+#       When ready, upgrade to Google Sheets for permanent cloud storage.
+#
+# FEATURES:
+#   • Paste screenshot from clipboard (Mac: Cmd+Ctrl+Shift+4)
+#   • Upload screenshot(s) from file (works on all devices)
+#   • Upload multiple screenshots — AI reads all together
+#   • Manual override fields for Title, Price, Seller if AI misses them
+#   • Stock/Quantity is optional — saves as N/A if not found
+#   • Search + dropdown to find products in the dashboard
+#   • Download full history as CSV anytime
 # =============================================================================
 
 
@@ -16,18 +21,16 @@
 # IMPORTS
 # =============================================================================
 
-import streamlit as st
-import streamlit_authenticator as stauth   # Handles login/logout/sessions
-import pandas as pd
-import os
-import json
-import re
-from datetime import datetime
-from PIL import Image
-import io
-import yaml                                # Reads the credentials config
-from yaml.loader import SafeLoader
+import streamlit as st               # Builds the entire web page
+import pandas as pd                  # Works with table/spreadsheet data
+import os                            # Checks whether files exist on disk
+import json                          # Reads structured data returned by the AI
+import re                            # Finds patterns in text (cleans AI output)
+from datetime import datetime        # Gets the current date and time
+from PIL import Image                # Opens and inspects image files
+import io                            # Reads image data held in memory
 
+# New official Google AI SDK
 from google import genai
 from google.genai import types
 
@@ -36,14 +39,21 @@ from google.genai import types
 # CONFIGURATION
 # =============================================================================
 
-CSV_FILE     = "price_history.csv"
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+CSV_FILE = "price_history.csv"
 
 CSV_COLUMNS = [
-    "timestamp", "tracking_id", "product_title", "seller_name",
-    "price", "quantity_left", "product_url", "num_screenshots",
-    "field_sources",
+    "timestamp",        # Date + time the entry was saved
+    "tracking_id",      # "Product Title | Seller Name"
+    "product_title",    # The product's full name
+    "seller_name",      # The shop/seller name
+    "price",            # Current price (e.g. "RM 25.90")
+    "quantity_left",    # Stock remaining — "N/A" if not found
+    "product_url",      # Shopee URL (for reference only)
+    "num_screenshots",  # How many screenshots were uploaded
+    "field_sources",    # Which fields came from AI vs manual input
 ]
+
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 MISSING_VALUES = {
     "not found", "n/a", "", "none", "unknown",
@@ -63,100 +73,25 @@ st.set_page_config(
 
 
 # =============================================================================
-# AUTHENTICATION SETUP
-# =============================================================================
-
-def build_auth_config():
-    """
-    Reads user credentials from Streamlit Secrets and builds the config
-    dictionary that streamlit-authenticator needs.
-
-    Credentials are stored in Streamlit Secrets under [credentials] — never
-    in the code itself or on GitHub.
-
-    The config structure matches exactly what streamlit-authenticator expects:
-    {
-      "credentials": {
-        "usernames": {
-          "aaron": { "name": "Aaron", "password": "hashed..." },
-          "sarah": { "name": "Sarah", "password": "hashed..." }
-        }
-      },
-      "cookie": { "name": "...", "key": "...", "expiry_days": 30 }
-    }
-    """
-    try:
-        # Read credentials section from Streamlit Secrets.
-        # This is a TOML table we'll add to secrets.toml (see setup guide below).
-        creds = st.secrets["credentials"]
-
-        config = {
-            "credentials": {
-                "usernames": {}
-            },
-            "cookie": {
-                # cookie_name: any unique string — identifies the auth cookie
-                # stored in the user's browser so they stay logged in
-                "name":         st.secrets.get("cookie_name", "shopee_tracker_auth"),
-                # cookie_key: a long random secret string used to sign the cookie
-                # so it cannot be tampered with
-                "key":          st.secrets.get("cookie_key",  "change_this_to_a_long_random_string"),
-                # expiry_days: how many days before the user must log in again
-                "expiry_days":  30,
-            },
-        }
-
-        # Build the usernames dictionary from secrets.
-        # Each user has their own [credentials.usernames.username] section.
-        for username, details in creds["usernames"].items():
-            config["credentials"]["usernames"][username] = {
-                "name":     details["name"],
-                "password": details["password"],  # plain text — auto-hashed by library
-            }
-
-        return config
-
-    except KeyError as e:
-        st.error(
-            f"❌ **Auth config missing key:** `{e}`\n\n"
-            "Make sure your Streamlit Secrets contain a `[credentials]` section. "
-            "See the setup guide for the exact format."
-        )
-        st.stop()
-
-
-def setup_authenticator():
-    """
-    Creates and returns the streamlit-authenticator Authenticate object.
-    This object renders the login form and manages sessions.
-    """
-    config = build_auth_config()
-
-    # Authenticate() takes the config dict and sets up everything.
-    # auto_hash=True means plain text passwords in secrets are hashed
-    # automatically — you never need to run a separate hashing script.
-    authenticator = stauth.Authenticate(
-        credentials=config["credentials"],
-        cookie_name=config["cookie"]["name"],
-        cookie_key=config["cookie"]["key"],
-        cookie_expiry_days=config["cookie"]["expiry_days"],
-        auto_hash=True,
-    )
-    return authenticator
-
-
-# =============================================================================
-# HELPER FUNCTIONS (same as v5 — no changes)
+# HELPER FUNCTIONS
 # =============================================================================
 
 def get_gemini_client():
+    """
+    Creates a Gemini API client using the secret API key stored in
+    Streamlit Secrets. Returns the client on success, None on failure.
+    """
     try:
-        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+        api_key = st.secrets["GEMINI_API_KEY"]
+        client  = genai.Client(api_key=api_key)
         return client
     except KeyError:
         st.error(
-            "🔑 **Gemini API Key Not Found!**\n\n"
-            "Add `GEMINI_API_KEY = \"your-key\"` to Streamlit Secrets."
+            "🔑 **API Key Not Found!**\n\n"
+            "Add this to your Streamlit Secrets:\n"
+            "```\nGEMINI_API_KEY = \"your-key-here\"\n```\n\n"
+            "**Locally:** edit `.streamlit/secrets.toml`\n"
+            "**Streamlit Cloud:** App Settings → Secrets"
         )
         return None
     except Exception as e:
@@ -165,6 +100,10 @@ def get_gemini_client():
 
 
 def load_price_history():
+    """
+    Reads the CSV file and returns it as a pandas DataFrame.
+    If the file doesn't exist yet, returns an empty table.
+    """
     if os.path.exists(CSV_FILE):
         df = pd.read_csv(CSV_FILE)
         for col in CSV_COLUMNS:
@@ -175,16 +114,28 @@ def load_price_history():
 
 
 def save_new_entry(record: dict):
+    """
+    Appends one new row to the CSV file.
+    Never deletes existing rows — history grows forever downward.
+    """
     new_df      = pd.DataFrame([record])
     file_exists = os.path.exists(CSV_FILE)
     new_df.to_csv(CSV_FILE, mode='a', header=not file_exists, index=False)
 
 
 def build_image_part(image_bytes: bytes):
+    """
+    Converts raw image bytes into a types.Part object the Gemini SDK can send.
+    Detects the correct MIME type (jpeg, png, webp, etc.) automatically.
+    """
     pil_img  = Image.open(io.BytesIO(image_bytes))
     fmt      = pil_img.format if pil_img.format else "JPEG"
-    mime_map = {"JPEG": "image/jpeg", "PNG": "image/png",
-                "WEBP": "image/webp", "GIF": "image/gif"}
+    mime_map = {
+        "JPEG": "image/jpeg",
+        "PNG":  "image/png",
+        "WEBP": "image/webp",
+        "GIF":  "image/gif",
+    }
     return types.Part.from_bytes(
         data=image_bytes,
         mime_type=mime_map.get(fmt, "image/jpeg")
@@ -192,6 +143,10 @@ def build_image_part(image_bytes: bytes):
 
 
 def extract_data_with_gemini(client, all_image_bytes: list) -> tuple:
+    """
+    Sends ALL uploaded screenshots to Gemini AI in one single request.
+    Returns (result_dict, None) on success or (None, error_string) on failure.
+    """
     num_images    = len(all_image_bytes)
     image_context = (
         "You are given 1 screenshot of a Shopee product page."
@@ -199,18 +154,21 @@ def extract_data_with_gemini(client, all_image_bytes: list) -> tuple:
         f"You are given {num_images} screenshots of the SAME Shopee product page, "
         f"taken from different scroll positions. Treat them as one complete page."
     )
+
     prompt = f"""
 You are a data extraction assistant. {image_context}
 
-Extract these four pieces of information:
-1. product_title  — Full product name/title.
+Using ALL the images together, extract these four pieces of information:
+
+1. product_title  — The full product name/title.
 2. price          — Current selling price with currency symbol (e.g. "RM 25.90").
-                    Use discounted price if two prices shown.
+                    Use the discounted price if two prices are shown.
                     If a range (e.g. RM10-RM20), return the lower value.
 3. seller_name    — Shop/seller name. Usually near "Chat Now" or "Visit Shop".
-4. quantity_left  — Remaining stock number only (e.g. "47"). Return "N/A" if not visible.
+4. quantity_left  — Remaining stock (e.g. "47"). Return "N/A" if not visible.
 
-Return ONLY a valid JSON object with exactly these four keys. No explanation, no markdown:
+Return ONLY a valid JSON object with exactly these four keys.
+No explanation, no markdown, no code fences — just raw JSON:
 {{
   "product_title": "...",
   "price": "...",
@@ -218,13 +176,19 @@ Return ONLY a valid JSON object with exactly these four keys. No explanation, no
   "quantity_left": "..."
 }}
 """
+
     try:
         contents = [build_image_part(b) for b in all_image_bytes] + [prompt]
-        response = client.models.generate_content(model=GEMINI_MODEL, contents=contents)
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+        )
         raw_text = response.text.strip()
-        match    = re.search(r'\{.*\}', raw_text, re.DOTALL)
+
+        match = re.search(r'\{.*\}', raw_text, re.DOTALL)
         if not match:
             return None, f"AI did not return valid JSON.\nRaw response:\n{raw_text}"
+
         data = json.loads(match.group())
         return {
             "product_title": data.get("product_title", "Not Found"),
@@ -232,6 +196,7 @@ Return ONLY a valid JSON object with exactly these four keys. No explanation, no
             "seller_name":   data.get("seller_name",   "Not Found"),
             "quantity_left": data.get("quantity_left", "N/A"),
         }, None
+
     except json.JSONDecodeError as e:
         return None, f"Could not parse AI response as JSON: {e}"
     except Exception as e:
@@ -239,20 +204,37 @@ Return ONLY a valid JSON object with exactly these four keys. No explanation, no
 
 
 def is_missing(value: str) -> bool:
+    """Returns True if a value is blank or a known 'not found' placeholder."""
     if not value:
         return True
     return str(value).strip().lower() in MISSING_VALUES
 
 
 def clean_quantity(value: str) -> str:
-    """Extracts only the integer from a quantity string. '30 pieces available' → '30'"""
+    """
+    Strips all non-numeric characters from a quantity/stock value,
+    returning only the integer portion.
+    Examples:
+        "30 pieces available" → "30"
+        "32"                  → "32"
+        "Stock: 18"           → "18"
+        "N/A"                 → "N/A"
+        ""                    → "N/A"
+    """
     if not value or str(value).strip().lower() in MISSING_VALUES:
         return "N/A"
+    # re.search finds the first group of digits in the string
     match = re.search(r'\d+', str(value))
     return match.group() if match else "N/A"
 
 
 def create_tracking_id(title: str, seller: str) -> str:
+    """
+    Builds the unique tracking key: 'Product Title | Seller Name'
+    Both parts are converted to Title Case so that entries like
+    'Sonos official store' and 'Sonos Official Store' are treated
+    as the same product+seller and don't create duplicate tracking lines.
+    """
     return f"{title.strip().title()} | {seller.strip().title()}"
 
 
@@ -262,50 +244,6 @@ def create_tracking_id(title: str, seller: str) -> str:
 
 def main():
 
-    # =========================================================================
-    # AUTHENTICATION — runs before anything else is shown
-    # =========================================================================
-    authenticator = setup_authenticator()
-
-    # Render the login form.
-    # location="main" puts it in the centre of the page (not the sidebar).
-    # If the user is already logged in via cookie, this is skipped automatically.
-    try:
-        authenticator.login(location="main")
-    except Exception as e:
-        st.error(f"Login error: {e}")
-        st.stop()
-
-    # Check the authentication result stored in session_state.
-    auth_status = st.session_state.get("authentication_status")
-    user_name   = st.session_state.get("name", "")
-
-    if auth_status is False:
-        # Wrong username or password
-        st.error("❌ Incorrect username or password. Please try again.")
-        st.stop()
-
-    elif auth_status is None:
-        # No login attempt yet — just show a welcome message below the form
-        st.info("👋 Please log in to access the Shopee Price Tracker.")
-        st.stop()
-
-    # ── If we reach here, the user is authenticated ──────────────────────────
-
-    # Show a greeting and logout button in the sidebar
-    with st.sidebar:
-        st.markdown(f"### 👤 Welcome, {user_name}!")
-        st.divider()
-        # Logout button — clears the session and cookie, returns to login page
-        authenticator.logout(button_name="🚪 Logout", location="sidebar")
-        st.divider()
-        st.caption("Shopee Price Tracker")
-
-
-    # =========================================================================
-    # MAIN APP CONTENT (only visible after login)
-    # =========================================================================
-
     st.title("🛒 Shopee Price Tracker")
     st.markdown(
         "Upload **one or more** screenshots of a Shopee product page. "
@@ -314,16 +252,24 @@ def main():
     )
     st.divider()
 
+    # reset_counter is an integer stored in session_state.
+    # Every time the user clicks "Clear All Fields", we add 1 to it.
+    # We then attach the counter to every widget's key= parameter.
+    # Because the key changes, Streamlit treats each field as a brand
+    # new widget and renders it completely empty — a reliable full reset.
+    if "reset_counter" not in st.session_state:
+        st.session_state.reset_counter = 0
+
+    # Shorthand — we'll use this variable when building widget keys below
+    r = st.session_state.reset_counter
+
+    # Connect to Gemini — stop if connection fails
     client = get_gemini_client()
     if client is None:
         st.stop()
 
+    # Load price history from CSV
     price_history_df = load_price_history()
-
-    # Initialise reset counter for field clearing
-    if "reset_counter" not in st.session_state:
-        st.session_state.reset_counter = 0
-    r = st.session_state.reset_counter
 
 
     # =========================================================================
@@ -331,20 +277,25 @@ def main():
     # =========================================================================
     with st.expander("📸 **Track a New Price Entry**", expanded=True):
 
-        # Clear all fields button
+        # Step 1 — URL
+        # --- Clear / Reset Button ---
+        # Sits at the very top of the form so it's easy to find.
+        # Clicking it wipes all fields and pasted images instantly,
+        # ready for the next product entry.
         if st.button("🔄 Clear All Fields & Start Over", key="clear_all"):
+            # Incrementing the counter changes ALL widget keys at once.
+            # Streamlit sees new keys = brand new empty widgets. Reliable full reset.
             st.session_state.reset_counter += 1
             st.session_state.pasted_images = []
             st.rerun()
 
         st.divider()
 
-        # Step 1 — URL
         st.markdown("#### Step 1 — Product URL *(optional)*")
         product_url = st.text_input(
             label="Paste the Shopee product URL here (saved for your records only)",
             placeholder="https://shopee.com.my/product/...",
-            key=f"url_input_{r}",
+            key=f"url_input_{r}",   # f-string includes counter — changes key on reset
         )
 
         st.divider()
@@ -356,7 +307,7 @@ def main():
             "All added images are sent to the AI together."
         )
 
-        # Method A: Clipboard Paste
+        # ── Method A: Clipboard Paste ──────────────────────────────────────
         st.markdown(
             "**📋 Method A — Paste from Clipboard** "
             "*(Mac: `Cmd+Ctrl+Shift+4` → select area → click button below)*"
@@ -364,21 +315,30 @@ def main():
 
         try:
             from streamlit_paste_button import paste_image_button
+
+            # Including r in the key forces a brand-new paste button
+            # after every clear or save — so the old image doesn't re-fire.
             paste_result = paste_image_button(
                 label="📋 Click here to paste screenshot from clipboard",
                 background_color="#2d6a4f",
                 hover_background_color="#1b4332",
                 key=f"paste_btn_{r}",
             )
+
             if paste_result and paste_result.image_data is not None:
                 paste_buffer = io.BytesIO()
                 paste_result.image_data.save(paste_buffer, format="PNG")
                 pasted_bytes = paste_buffer.getvalue()
+
                 if "pasted_images" not in st.session_state:
                     st.session_state.pasted_images = []
+
                 if pasted_bytes not in st.session_state.pasted_images:
                     st.session_state.pasted_images.append(pasted_bytes)
-                    st.success(f"✅ Screenshot pasted! ({len(st.session_state.pasted_images)} ready)")
+                    st.success(
+                        f"✅ Screenshot pasted! "
+                        f"({len(st.session_state.pasted_images)} pasted image(s) ready)"
+                    )
 
             if "pasted_images" in st.session_state and st.session_state.pasted_images:
                 st.markdown(f"*{len(st.session_state.pasted_images)} pasted image(s):*")
@@ -386,6 +346,7 @@ def main():
                 for i, pb in enumerate(st.session_state.pasted_images):
                     with paste_cols[i % 4]:
                         st.image(pb, caption=f"Pasted {i + 1}", use_container_width=True)
+
                 if st.button("🗑️ Clear pasted images", key=f"clear_paste_{r}"):
                     st.session_state.reset_counter += 1
                     st.session_state.pasted_images = []
@@ -393,20 +354,25 @@ def main():
 
         except ImportError:
             st.warning(
-                "⚠️ Clipboard paste not available.\n"
-                "```\npip install streamlit-paste-button\n```"
+                "⚠️ Clipboard paste not available. Install it with:\n"
+                "```\npip install streamlit-paste-button\n```\n"
+                "Then restart the app. File upload below still works."
             )
 
         st.markdown("---")
 
-        # Method B: File Upload
-        st.markdown("**📁 Method B — Upload File(s)** *(works on all devices)*")
+        # ── Method B: File Upload ──────────────────────────────────────────
+        st.markdown(
+            "**📁 Method B — Upload File(s)** *(works on all devices including mobile)*"
+        )
+
         uploaded_files = st.file_uploader(
             label="Upload screenshot(s) — JPG, PNG, or WEBP",
             type=["jpg", "jpeg", "png", "webp"],
             accept_multiple_files=True,
-            key=f"file_uploader_{r}",
+            help="💡 On mobile: select multiple photos from your gallery at once.",
         )
+
         if uploaded_files:
             st.markdown(f"*{len(uploaded_files)} uploaded file(s):*")
             cols_per_row = min(len(uploaded_files), 4)
@@ -421,22 +387,28 @@ def main():
         st.markdown("#### Step 3 — Manual Overrides *(fill in if AI misses anything)*")
         st.markdown(
             "Leave blank to let the AI fill automatically. "
-            "Your typed value always overrides the AI. "
-            "Stock is optional — saves as N/A if blank."
+            "Type here if AI gets something wrong — **your input always wins.** "
+            "Stock is optional and saves as N/A if left blank."
         )
+
         oc1, oc2 = st.columns(2)
         with oc1:
+            # Each key includes r (the reset counter).
+            # When r increases, Streamlit creates a fresh empty widget.
             manual_title = st.text_input(
-                "📦 Product Title", placeholder="e.g. Wireless Bluetooth Earbuds",
+                "📦 Product Title",
+                placeholder="e.g. Wireless Bluetooth Earbuds Pro Max",
                 key=f"manual_title_{r}",
             )
             manual_price = st.text_input(
-                "💰 Price", placeholder="e.g. RM 25.90",
+                "💰 Price",
+                placeholder="e.g. RM 25.90",
                 key=f"manual_price_{r}",
             )
         with oc2:
             manual_seller = st.text_input(
-                "🏪 Seller / Shop Name", placeholder="e.g. TechShopMY Official Store",
+                "🏪 Seller / Shop Name",
+                placeholder="e.g. TechShopMY Official Store",
                 key=f"manual_seller_{r}",
             )
             manual_stock = st.text_input(
@@ -458,7 +430,8 @@ def main():
         analyze_clicked = st.button(
             label=(
                 f"🤖 Analyze {total_images} Screenshot(s) with AI & Save"
-                if total_images > 0 else "🤖 Analyze Screenshot(s) with AI & Save"
+                if total_images > 0
+                else "🤖 Analyze Screenshot(s) with AI & Save"
             ),
             type="primary",
             use_container_width=True,
@@ -467,7 +440,9 @@ def main():
         if no_images:
             st.caption("⬆️ Paste or upload at least one screenshot to enable this button.")
 
+        # --- Processing block ---
         if analyze_clicked and not no_images:
+
             all_image_bytes = pasted_bytes_list + uploaded_bytes_list
 
             with st.spinner(
@@ -478,29 +453,39 @@ def main():
 
             if error_msg:
                 st.error(f"❌ AI extraction failed:\n\n{error_msg}")
-                st.info("💡 Fill in Step 3 manually and click Analyze again.")
+                st.info(
+                    "💡 **You can still save manually.** "
+                    "Fill in Step 3 above and click Analyze again."
+                )
                 ai_result = {
-                    "product_title": "Not Found", "price": "Not Found",
-                    "seller_name": "Not Found", "quantity_left": "N/A",
+                    "product_title": "Not Found",
+                    "price":         "Not Found",
+                    "seller_name":   "Not Found",
+                    "quantity_left": "N/A",
                 }
 
-            def resolve(manual_val, ai_val, fallback="Not Found"):
-                mv = manual_val.strip() if manual_val else ""
-                if mv:                       return mv,      "Manual"
-                elif not is_missing(ai_val): return ai_val,  "AI"
-                else:                        return fallback, "fallback"
-
-            # Read values from session_state using dynamic keys
+            # Merge AI + manual overrides
+            # Read the current values from session_state using the dynamic keys
             manual_title  = st.session_state.get(f"manual_title_{r}",  "")
             manual_price  = st.session_state.get(f"manual_price_{r}",  "")
             manual_seller = st.session_state.get(f"manual_seller_{r}", "")
             manual_stock  = st.session_state.get(f"manual_stock_{r}",  "")
+
+            def resolve(manual_val, ai_val, fallback="Not Found"):
+                mv = manual_val.strip() if manual_val else ""
+                if mv:
+                    return mv, "Manual"
+                elif not is_missing(ai_val):
+                    return ai_val, "AI"
+                else:
+                    return fallback, "fallback"
 
             final_title,  src_title  = resolve(manual_title,  ai_result["product_title"])
             final_price,  src_price  = resolve(manual_price,  ai_result["price"])
             final_seller, src_seller = resolve(manual_seller, ai_result["seller_name"])
             final_stock,  src_stock  = resolve(manual_stock,  ai_result["quantity_left"], "N/A")
 
+            # Check required fields
             missing_required = []
             if is_missing(final_title):  missing_required.append("Product Title")
             if is_missing(final_price):  missing_required.append("Price")
@@ -510,19 +495,25 @@ def main():
                 st.warning(
                     "⚠️ **Required field(s) missing:**\n\n"
                     + "\n".join(f"- **{f}**" for f in missing_required)
-                    + "\n\nFill them in **Step 3** and click **Analyze** again."
+                    + "\n\nFill them in **Step 3** above and click **Analyze** again."
                 )
                 st.stop()
-
-            # Normalise to Title Case and clean quantity
-            final_title  = final_title.strip().title()
-            final_seller = final_seller.strip().title()
-            final_stock  = clean_quantity(final_stock)
 
             source_summary = (
                 f"title={src_title}, price={src_price}, "
                 f"seller={src_seller}, stock={src_stock}"
             )
+
+            # Normalise title and seller to Title Case before saving.
+            # This ensures 'sonos official store' and 'Sonos Official Store'
+            # are stored identically and tracked as the same entry.
+            final_title  = final_title.strip().title()
+            final_seller = final_seller.strip().title()
+
+            # Strip all words from quantity — store only the integer.
+            # "30 pieces available" → "30", "Stock: 18" → "18"
+            final_stock  = clean_quantity(final_stock)
+
             timestamp   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             tracking_id = create_tracking_id(final_title, final_seller)
 
@@ -540,12 +531,16 @@ def main():
             save_new_entry(record)
 
             st.success("✅ Entry saved successfully!")
+
             st.markdown("**Saved values and where they came from:**")
             c1, c2, c3, c4 = st.columns(4)
 
             def show_metric(col, label, value, source):
-                icon = ("🖊️ Manual" if source == "Manual" else
-                        "🤖 AI"     if source == "AI"     else "⚠️ Fallback")
+                icon = (
+                    "🖊️ Manual"   if source == "Manual"   else
+                    "🤖 AI"       if source == "AI"        else
+                    "⚠️ Fallback"
+                )
                 with col:
                     st.metric(label, value)
                     st.caption(icon)
@@ -557,14 +552,16 @@ def main():
 
             st.info(f"🔑 **Tracking ID:** `{tracking_id}`")
 
-            # Clear all fields after successful save
+            # Auto-clear all fields after a successful save
+            # by incrementing the counter — same mechanism as the Clear button
             st.session_state.reset_counter += 1
             st.session_state.pasted_images = []
+
             st.rerun()
 
 
     # =========================================================================
-    # SECTION B — DASHBOARD
+    # SECTION B — PRICE HISTORY DASHBOARD
     # =========================================================================
     st.divider()
     st.subheader("📊 Price History Dashboard")
@@ -573,61 +570,84 @@ def main():
         st.info("📭 No price history yet. Upload your first screenshot above!")
         return
 
+    # Summary stats
+    st.markdown("#### Overview")
     s1, s2, s3 = st.columns(3)
     with s1: st.metric("Total Records",    len(price_history_df))
     with s2: st.metric("Products Tracked", price_history_df["tracking_id"].nunique())
     with s3: st.metric("Last Updated",     price_history_df["timestamp"].iloc[-1])
 
     st.divider()
+
+    # Search + dropdown
     st.markdown("#### 🔍 View History for a Specific Product")
 
-    all_ids      = price_history_df["tracking_id"].unique().tolist()
+    all_ids = price_history_df["tracking_id"].unique().tolist()
+
     search_query = st.text_input(
         label="🔎 Search by product name or seller",
         placeholder="e.g. Sonos  or  ASUS  or  Official Store",
-        help="Type any word to filter the dropdown. Leave blank to show all.",
+        help="Type any word to filter the dropdown below. Leave blank to show all.",
         key="product_search",
     )
 
-    filtered_ids = (
-        [tid for tid in all_ids if search_query.strip().lower() in tid.lower()]
-        if search_query.strip() else all_ids
-    )
+    if search_query.strip():
+        filtered_ids = [
+            tid for tid in all_ids
+            if search_query.strip().lower() in tid.lower()
+        ]
+    else:
+        filtered_ids = all_ids
 
     if search_query.strip():
         if filtered_ids:
-            st.caption(f"✅ {len(filtered_ids)} match(es) out of {len(all_ids)} products.")
+            st.caption(f"✅ {len(filtered_ids)} match(es) found out of {len(all_ids)} products.")
         else:
             st.warning(f"⚠️ No products matched \"{search_query}\". Try a different keyword.")
 
+    dropdown_options = filtered_ids if filtered_ids else all_ids
+
     selected_id = st.selectbox(
-        "Select a Product + Seller combination:",
-        options=filtered_ids if filtered_ids else all_ids,
+        label="Select a Product + Seller combination:",
+        options=dropdown_options,
+        help="Use the search box above to filter this list.",
     )
 
-    filtered = price_history_df[price_history_df["tracking_id"] == selected_id].copy()
+    filtered = price_history_df[
+        price_history_df["tracking_id"] == selected_id
+    ].copy()
 
+    # Price chart
     st.markdown(f"##### Price Over Time — `{selected_id}`")
     try:
         filtered["price_numeric"] = pd.to_numeric(
-            filtered["price"].str.replace(r"[^\d.]", "", regex=True), errors="coerce"
+            filtered["price"].str.replace(r"[^\d.]", "", regex=True),
+            errors="coerce",
         )
         if filtered["price_numeric"].notna().any():
-            st.line_chart(filtered.set_index("timestamp")["price_numeric"],
-                          use_container_width=True)
+            st.line_chart(
+                filtered.set_index("timestamp")["price_numeric"],
+                use_container_width=True,
+            )
         else:
-            st.warning("Could not draw chart — prices not in numeric format.")
+            st.warning("Could not draw chart — prices are not in a numeric format.")
     except Exception as e:
         st.warning(f"Chart error: {e}")
 
+    # History table
     st.markdown("##### Entry History")
-    show_cols = ["timestamp", "price", "quantity_left", "seller_name",
-                 "num_screenshots", "field_sources", "product_url"]
+    show_cols = [
+        "timestamp", "price", "quantity_left", "seller_name",
+        "num_screenshots", "field_sources", "product_url",
+    ]
     show_cols = [c for c in show_cols if c in filtered.columns]
     st.dataframe(filtered[show_cols], use_container_width=True, hide_index=True)
 
     st.divider()
+
+    # Export
     st.markdown("#### 📋 All Records & Export")
+
     if st.checkbox("Show full raw data table"):
         st.dataframe(price_history_df, use_container_width=True, hide_index=True)
 
@@ -636,12 +656,13 @@ def main():
         data=price_history_df.to_csv(index=False).encode("utf-8"),
         file_name="shopee_price_history.csv",
         mime="text/csv",
+        help="Download all your saved price records as a spreadsheet file.",
     )
 
     st.divider()
     st.caption(
-        f"Shopee Price Tracker v7 • Model: {GEMINI_MODEL} • "
-        f"Logged in as: {user_name} • Powered by Streamlit"
+        f"Shopee Price Tracker v5 • Model: {GEMINI_MODEL} • "
+        "Storage: Local CSV • Powered by Streamlit"
     )
 
 
